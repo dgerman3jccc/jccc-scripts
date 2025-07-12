@@ -32,7 +32,8 @@
 #>
 Param(
     [string]$OrgName = 'jccc-oop',
-    [string]$Pattern = '^[a-z0-9]+-([a-z0-9]+-)+',
+    # Only match repos with email-like prefix (e.g., facmet107-gmail-com-) before assignment name
+    [string]$Pattern = '^[a-z0-9]+(-[a-z0-9]+)*@[a-z0-9]+(-[a-z0-9]+)*-[a-zA-Z]',
     [switch]$Force
 )
 
@@ -77,4 +78,3 @@ foreach ($repo in $studentRepos) {
 }
 
 Write-Host "Cleanup complete."
-
