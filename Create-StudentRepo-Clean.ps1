@@ -81,33 +81,71 @@ try {
     $branches += "main" # Ensure main is included and processed
     $uniqueBranches = $branches | Select-Object -Unique
 
-    # 10. For each branch, create a clean version and push it
-    foreach ($branch in $uniqueBranches) {
-        Write-Host "Processing branch '$branch'..."
-        # Create a temporary directory for the clean branch
-        $cleanDir = Join-Path -Path $env:TEMP -ChildPath ([guid]::NewGuid().ToString())
-        New-Item -ItemType Directory -Path $cleanDir -Force | Out-Null
-
-        try {
-            # Checkout the branch files into the clean directory
-            git checkout $branch --force
-            Copy-Item -Path "$tempDir\*" -Destination $cleanDir -Recurse -Exclude ".git"
-
-            Push-Location $cleanDir
-            # Initialize a new git repo to remove history
-            git init -b $branch
-            git remote add origin "https://github.com/$OrgName/$studentRepoName.git"
-            git add .
-            git commit -m "Initial commit for $branch"
-            git push origin $branch --force
-            Pop-Location
-        }
-        finally {
-            Remove-Item -Path $cleanDir -Recurse -Force -ErrorAction SilentlyContinue
-        }
+    # 10. Create and push main branch first
+    Write-Host "Processing branch 'main'..."
+    $mainCleanDir = Join-Path -Path $env:TEMP -ChildPath ([guid]::NewGuid().ToString())
+    New-Item -ItemType Directory -Path $mainCleanDir -Force | Out-Null
+    try {
+        git checkout main --force
+        Copy-Item -Path "$tempDir\*" -Destination $mainCleanDir -Recurse -Exclude ".git"
+        Push-Location $mainCleanDir
+        git init -b main
+        git remote add origin "https://github.com/$OrgName/$studentRepoName.git"
+        git add .
+        git commit -m "Initial commit for main"
+        git push origin main --force
+        Pop-Location
+    } finally {
+        Remove-Item -Path $mainCleanDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 
-    # 11. Set branch protection for the main branch
+    # 11. Clone student repo and create assignment branch from main
+    $studentTempDir = Join-Path -Path $env:TEMP -ChildPath ([guid]::NewGuid().ToString())
+    New-Item -ItemType Directory -Path $studentTempDir -Force | Out-Null
+    Write-Host "Cloning student repo to create assignment branch..."
+    Push-Location $studentTempDir
+    try {
+        # Ensure $tempDir is checked out to the correct branch before copying
+        Push-Location $tempDir
+        git checkout assignment --force
+        Pop-Location
+
+        git clone "https://github.com/$OrgName/$studentRepoName.git" .
+        git checkout -b assignment main
+        # Remove all files/folders except .git before copying
+        Get-ChildItem -Path $studentTempDir -Force -Exclude ".git" | Remove-Item -Recurse -Force
+        Copy-Item -Path "$tempDir\*" -Destination $studentTempDir -Recurse -Force -Exclude ".git"
+        git add .
+        git commit -m "Initial commit for assignment"
+        git push origin assignment --force
+    } finally {
+        Pop-Location
+        Remove-Item -Path $studentTempDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    # 12. Create solution branch as orphan
+    Write-Host "Processing branch 'solution'..."
+    $solutionCleanDir = Join-Path -Path $env:TEMP -ChildPath ([guid]::NewGuid().ToString())
+    New-Item -ItemType Directory -Path $solutionCleanDir -Force | Out-Null
+    try {
+        # Ensure $tempDir is checked out to solution branch before copying
+        Push-Location $tempDir
+        git checkout solution --force
+        Pop-Location
+        Copy-Item -Path "$tempDir\*" -Destination $solutionCleanDir -Recurse -Exclude ".git"
+        Push-Location $solutionCleanDir
+        git init
+        git checkout --orphan solution
+        git remote add origin "https://github.com/$OrgName/$studentRepoName.git"
+        git add .
+        git commit -m "Initial commit for solution"
+        git push origin solution --force
+        Pop-Location
+    } finally {
+        Remove-Item -Path $solutionCleanDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    # 13. Set branch protection for the main branch
     $defaultBranch = "main"
     Write-Host "Setting up branch protection rules for $defaultBranch branch..."
     $protectionBody = @{
