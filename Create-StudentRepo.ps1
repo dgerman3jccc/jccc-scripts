@@ -75,16 +75,45 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 } else {
     Write-Host "✅ Repository created: $OrgName/$repoName"
-    # Create 'assignment' branch in the new repo
-    $repoUrl = "https://github.com/$OrgName/$repoName.git"
-    $tmpDir = "$env:TEMP\$repoName-branch"
-    git clone $repoUrl $tmpDir
-    cd $tmpDir
-    git checkout -b assignment
-    git push origin assignment
-    cd ..
-    Remove-Item -Recurse -Force $tmpDir
-    Write-Host "✅ 'assignment' branch created and pushed. Student should work on this branch."
+    # Assignment branch creation removed; ensure it exists in template repo.
+}
+
+# --- Sync all branches from template to new repo ---
+Write-Host "Syncing all branches from template '$templateFull' to '$OrgName/$repoName'..."
+
+# Get all branches from the template repo
+try {
+    $templateBranches = gh api "repos/$templateFull/branches" | ConvertFrom-Json
+} catch {
+    Write-Error "Failed to retrieve branches from template repository '$templateFull'."; exit 1
+}
+
+# Get the default branch of the template repo to skip it
+try {
+    $templateInfo = gh api "repos/$templateFull" | ConvertFrom-Json
+    $defaultBranch = $templateInfo.default_branch
+} catch {
+    Write-Error "Failed to retrieve default branch from template repository '$templateFull'."; exit 1
+}
+
+foreach ($branch in $templateBranches) {
+    $branchName = $branch.name
+    if ($branchName -eq $defaultBranch) {
+        Write-Host "Skipping default branch '$branchName' (already created by template)."
+        continue
+    }
+
+    $commitSha = $branch.commit.sha
+    Write-Host "Creating branch '$branchName' in '$OrgName/$repoName' from commit SHA '$commitSha'..."
+
+    # Create the new branch in the student repo by creating a new git ref
+    gh api "repos/$OrgName/$repoName/git/refs" -X POST -f "ref=refs/heads/$branchName" -f "sha=$commitSha" | Out-Null
+
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  ✅ Branch '$branchName' created successfully."
+    } else {
+        Write-Error "  ❌ Failed to create branch '$branchName'."
+    }
 }
 
 # Grant repo access to corresponding team if it exists
