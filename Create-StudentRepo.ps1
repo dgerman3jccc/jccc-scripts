@@ -63,6 +63,13 @@ New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
 Write-Host "Cloning source repository '$SourceRepo' to temporary directory..."
 Push-Location $tempDir
 try {
+    # Verify source repository exists before attempting to clone
+    $sourceRepoExists = gh repo view "$OrgName/$SourceRepo" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Source repository '$OrgName/$SourceRepo' not found. Please verify it exists."
+        exit 1
+    }
+
     gh repo clone "$OrgName/$SourceRepo" . | Out-Null
 
     # 8. Add the student repository as a remote and push all branches
@@ -89,7 +96,36 @@ try {
     $defaultBranch = git remote show origin | Select-String "HEAD branch" | ForEach-Object { ($_ -split ":")[1].Trim() }
     git checkout $defaultBranch --force
 
+    # 9. Add branch protection rules for the main branch
+    Write-Host "Setting up branch protection rules for $defaultBranch branch..."
+
+    # Create branch protection rule using GitHub API with proper PowerShell syntax
+    # This requires at least one pull request review before merging to main
+    $protectionBody = @{
+        required_status_checks = $null
+        enforce_admins = $false
+        required_pull_request_reviews = @{
+            required_approving_review_count = 1
+        }
+        restrictions = $null
+    } | ConvertTo-Json -Depth 10
+
+    # Create a temporary file for the JSON payload
+    $tempFile = [System.IO.Path]::GetTempFileName()
+    Set-Content -Path $tempFile -Value $protectionBody
+
+    # Apply branch protection using GitHub CLI with the file as input
+    gh api "repos/$OrgName/$studentRepoName/branches/$defaultBranch/protection" `
+        --method PUT `
+        --header "Accept: application/vnd.github+json" `
+        --header "X-GitHub-Api-Version: 2022-11-28" `
+        --input $tempFile
+
+    # Clean up temp file
+    Remove-Item -Path $tempFile -Force
+
     Write-Host "✅ Repository '$studentRepoName' created successfully for student '$StudentEmail'."
+    Write-Host "✅ Branch protection rules for $defaultBranch branch have been set up."
 } finally {
     # Clean up
     Pop-Location
