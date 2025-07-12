@@ -33,7 +33,7 @@
 Param(
     [string]$OrgName = 'jccc-oop',
     # Only match repos with email-like prefix (e.g., facmet107-gmail-com-) before assignment name
-    [string]$Pattern = '^[a-z0-9]+(-[a-z0-9]+)*@[a-z0-9]+(-[a-z0-9]+)*-[a-zA-Z]',
+    [string]$Pattern = '^[a-z0-9]+-([a-z0-9]+-)+',
     [switch]$Force
 )
 
