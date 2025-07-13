@@ -1,0 +1,23 @@
+@startuml
+
+abstract class Animal {
+  + abstract MakeSound() : string
+}
+
+class Dog {
+  + MakeSound() : string
+}
+
+class Cat {
+  + MakeSound() : string
+}
+
+class Program {
+  + static Main(args : string[]) : void
+}
+
+Animal <|-- Dog
+Animal <|-- Cat
+Program ..> Animal
+
+@enduml
