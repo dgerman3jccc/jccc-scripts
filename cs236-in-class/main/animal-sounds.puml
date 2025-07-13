@@ -1,0 +1,26 @@
+@startuml
+
+interface IDisplayable {
+    +GetDisplayName() : string
+}
+
+abstract class Animal {
+    +MakeSound() : string
+}
+
+class Dog {
+    +MakeSound() : string
+    +GetDisplayName() : string
+}
+
+class Cat {
+    +MakeSound() : string
+    +GetDisplayName() : string
+}
+
+Animal <|-- Dog
+Animal <|-- Cat
+IDisplayable <|.. Dog
+IDisplayable <|.. Cat
+
+@enduml
