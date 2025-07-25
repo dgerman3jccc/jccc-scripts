@@ -10,15 +10,21 @@ param(
 if ($Help) {
     Write-Host "=== Git Repository Migration to GitHub - Help ===" -ForegroundColor Green
     Write-Host ""
-    Write-Host "This script migrates a Git repository to GitHub with cleanup functionality." -ForegroundColor White
+    Write-Host "This script migrates a Git repository to GitHub with automatic cleanup functionality." -ForegroundColor White
+    Write-Host ""
+    Write-Host "Features:" -ForegroundColor Yellow
+    Write-Host "  • Migrates all branches (excluding feature/bugfix/fix branches)" -ForegroundColor White
+    Write-Host "  • Migrates all repository tags with verification" -ForegroundColor White
+    Write-Host "  • Sets appropriate default branch on GitHub (main > master > first available)" -ForegroundColor White
+    Write-Host "  • Automatic cleanup of temporary local repository" -ForegroundColor White
     Write-Host ""
     Write-Host "Parameters:" -ForegroundColor Yellow
-    Write-Host "  -KeepLocalRepo    Skip cleanup of the local repository directory" -ForegroundColor White
+    Write-Host "  -KeepLocalRepo    Skip automatic cleanup of the local repository directory" -ForegroundColor White
     Write-Host "  -Help             Show this help message" -ForegroundColor White
     Write-Host ""
     Write-Host "Example usage:" -ForegroundColor Yellow
-    Write-Host "  .\Migrate-RepoToGitHub.ps1                    # Normal execution with cleanup" -ForegroundColor White
-    Write-Host "  .\Migrate-RepoToGitHub.ps1 -KeepLocalRepo     # Keep local repo for verification" -ForegroundColor White
+    Write-Host "  .\Migrate-RepoToGitHub.ps1                    # Normal execution with automatic cleanup" -ForegroundColor White
+    Write-Host "  .\Migrate-RepoToGitHub.ps1 -KeepLocalRepo     # Keep local repo for verification/debugging" -ForegroundColor White
     Write-Host ""
     exit 0
 }
@@ -241,20 +247,103 @@ try {
         }
     }
 
-    # Push all tags
+    # Push all tags with verification
     Write-Host ""
-    Write-Host "Pushing all tags..." -ForegroundColor Cyan
-    try {
-        $AuthUrl = "https://$GitHubUsername`:$script:PlainTextToken@github.com/$GitHubOrgName/$DestRepoName.git"
-        git push $AuthUrl --tags
-        
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "All tags pushed successfully" -ForegroundColor Green
-        } else {
-            Write-Host "Warning: Some tags may not have been pushed" -ForegroundColor Yellow
+    Write-Host "Processing repository tags..." -ForegroundColor Cyan
+
+    # Get list of local tags
+    $localTags = git tag
+    if ($localTags) {
+        $tagCount = ($localTags | Measure-Object).Count
+        Write-Host "Found $tagCount tag(s) to migrate: $($localTags -join ', ')" -ForegroundColor Green
+
+        Write-Host "Pushing all tags to GitHub..." -ForegroundColor Cyan
+        try {
+            $AuthUrl = "https://$GitHubUsername`:$script:PlainTextToken@github.com/$GitHubOrgName/$DestRepoName.git"
+            $pushOutput = git push $AuthUrl --tags 2>&1
+
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "✓ All $tagCount tag(s) pushed successfully" -ForegroundColor Green
+
+                # Verify tags were pushed by checking remote tags
+                Write-Host "Verifying tag migration..." -ForegroundColor Cyan
+                $remoteTags = git ls-remote --tags $AuthUrl 2>$null | ForEach-Object {
+                    if ($_ -match 'refs/tags/(.+)$') { $matches[1] }
+                } | Where-Object { $_ -notmatch '\^{}$' }
+
+                if ($remoteTags) {
+                    $remoteTagCount = ($remoteTags | Measure-Object).Count
+                    if ($remoteTagCount -eq $tagCount) {
+                        Write-Host "✓ Tag verification successful: $remoteTagCount/$tagCount tags confirmed on GitHub" -ForegroundColor Green
+                    } else {
+                        Write-Host "⚠ Warning: Tag count mismatch - Local: $tagCount, Remote: $remoteTagCount" -ForegroundColor Yellow
+                    }
+                } else {
+                    Write-Host "⚠ Warning: Could not verify remote tags" -ForegroundColor Yellow
+                }
+            } else {
+                Write-Host "⚠ Warning: Tag push failed with exit code $LASTEXITCODE" -ForegroundColor Yellow
+                Write-Host "Push output: $pushOutput" -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Host "⚠ Warning: Error pushing tags - $_" -ForegroundColor Yellow
         }
-    } catch {
-        Write-Host "Warning: Error pushing tags - $_" -ForegroundColor Yellow
+    } else {
+        Write-Host "No tags found in repository - skipping tag migration" -ForegroundColor Yellow
+    }
+
+    # Set default branch on GitHub
+    Write-Host ""
+    Write-Host "Configuring default branch on GitHub..." -ForegroundColor Cyan
+
+    # Get list of pushed branches to determine the best default branch
+    $pushedBranches = @()
+    foreach ($branch in $branches) {
+        if ($branch -notmatch '^(feature|bugfix|fix)/') {
+            $pushedBranches += $branch
+        }
+    }
+
+    # Determine the best default branch
+    $defaultBranch = $null
+    if ($pushedBranches -contains "main") {
+        $defaultBranch = "main"
+        Write-Host "Setting 'main' as default branch" -ForegroundColor Green
+    } elseif ($pushedBranches -contains "master") {
+        $defaultBranch = "master"
+        Write-Host "Setting 'master' as default branch" -ForegroundColor Green
+    } elseif ($pushedBranches.Count -gt 0) {
+        $defaultBranch = $pushedBranches[0]
+        Write-Host "Setting '$defaultBranch' as default branch (first available branch)" -ForegroundColor Yellow
+    }
+
+    if ($defaultBranch) {
+        try {
+            # GitHub API call to set default branch
+            $apiUrl = "https://api.github.com/repos/$GitHubOrgName/$DestRepoName"
+            $headers = @{
+                "Authorization" = "token $script:PlainTextToken"
+                "Accept" = "application/vnd.github.v3+json"
+                "User-Agent" = "PowerShell-Migration-Script"
+            }
+            $body = @{
+                "default_branch" = $defaultBranch
+            } | ConvertTo-Json
+
+            $response = Invoke-RestMethod -Uri $apiUrl -Method PATCH -Headers $headers -Body $body -ContentType "application/json"
+            Write-Host "✓ Default branch successfully set to '$defaultBranch'" -ForegroundColor Green
+        } catch {
+            $errorMessage = $_.Exception.Message
+            if ($_.Exception.Response) {
+                $statusCode = $_.Exception.Response.StatusCode.value__
+                Write-Host "⚠ Warning: Failed to set default branch (HTTP $statusCode): $errorMessage" -ForegroundColor Yellow
+            } else {
+                Write-Host "⚠ Warning: Failed to set default branch: $errorMessage" -ForegroundColor Yellow
+            }
+            Write-Host "  You may need to manually set the default branch in GitHub repository settings" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "⚠ Warning: No suitable branches found for setting as default" -ForegroundColor Yellow
     }
 
     # Success message
@@ -281,30 +370,21 @@ try {
 } finally {
     # Always perform cleanup on successful completion
     if (-not $Error.Count) {
-        # Determine if we should clean up the repository
+        # Determine if we should clean up the repository (automatic cleanup by default)
         $shouldCleanupRepo = -not $KeepLocalRepo
-        
-        if ($script:RepoDirectoryCreated -and -not $KeepLocalRepo) {
-            Write-Host "The local repository directory '$RepoName' was created during migration." -ForegroundColor Yellow
-            $userChoice = Read-Host "Would you like to remove it? (Y/n)"
-            if ($userChoice -eq "" -or $userChoice -match "^[Yy]") {
-                $shouldCleanupRepo = $true
-                Write-Host "Local repository will be removed." -ForegroundColor Green
-            } else {
-                $shouldCleanupRepo = $false
-                Write-Host "Local repository will be kept for verification." -ForegroundColor Yellow
-            }
-        } elseif ($KeepLocalRepo) {
+
+        if ($KeepLocalRepo) {
             Write-Host "Local repository directory '$RepoName' will be kept (KeepLocalRepo parameter specified)." -ForegroundColor Yellow
-            $shouldCleanupRepo = $false
+        } elseif ($script:RepoDirectoryCreated) {
+            Write-Host "Automatically cleaning up local repository directory..." -ForegroundColor Cyan
         }
-        
+
         # Perform cleanup
         Invoke-Cleanup -SkipRepoCleanup:(-not $shouldCleanupRepo)
-        
+
         if ($shouldCleanupRepo) {
             Write-Host ""
-            Write-Host "Migration completed successfully with cleanup." -ForegroundColor Green
+            Write-Host "Migration completed successfully with automatic cleanup." -ForegroundColor Green
         } else {
             Write-Host ""
             Write-Host "Migration completed successfully. Local repository preserved at: $RepoName" -ForegroundColor Green
