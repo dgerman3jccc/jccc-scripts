@@ -44,13 +44,88 @@ Write-Host ""
 # Prompt for Source Repository URL
 $SourceRepoUrl = Read-Host "Please enter the full source repository URL to clone"
 
+# Prompt for GitHub Organization
+Write-Host ""
+$GitHubOrgName = Read-Host "Please enter the target GitHub organization name (e.g., 'oop-jccc', 'HylandSoftware')"
+
 # Prompt for GitHub Personal Access Token (hidden input)
 Write-Host ""
 $SecureToken = Read-Host "Please enter your GitHub Personal Access Token (PAT)" -AsSecureString
 
 # Hardcoded Values
-$GitHubOrgName = "HylandSoftware"
 $GitHubUsername = "d-german"
+
+# Helper function to convert HTTPS URL to SSH format
+function Convert-HttpsToSsh {
+    param(
+        [string]$HttpsUrl
+    )
+
+    if ($HttpsUrl -match 'https://github\.com/([^/]+)/(.+?)(?:\.git)?/?$') {
+        $org = $matches[1]
+        $repo = $matches[2]
+        return "git@github.com:$org/$repo.git"
+    }
+
+    # If it's not a GitHub HTTPS URL, return as-is
+    return $HttpsUrl
+}
+
+# Helper function to execute Git commands with HTTPS-to-SSH fallback
+function Invoke-GitWithFallback {
+    param(
+        [string]$Operation,
+        [string]$HttpsUrl,
+        [string[]]$GitArgs,
+        [string]$SuccessMessage,
+        [string]$FailureMessage,
+        [switch]$ThrowOnFailure
+    )
+
+    Write-Host "Attempting $Operation using HTTPS..." -ForegroundColor Cyan
+
+    # First attempt with HTTPS
+    $gitCommand = @('git') + $GitArgs
+    & $gitCommand[0] $gitCommand[1..($gitCommand.Length-1)] | Out-Null
+
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "✓ $SuccessMessage (HTTPS)" -ForegroundColor Green
+        return $true
+    }
+
+    # HTTPS failed, try SSH fallback
+    Write-Host "⚠ HTTPS $Operation failed (exit code: $LASTEXITCODE)" -ForegroundColor Yellow
+    Write-Host "Attempting $Operation using SSH fallback..." -ForegroundColor Cyan
+
+    # Convert HTTPS URL to SSH format
+    $sshUrl = Convert-HttpsToSsh -HttpsUrl $HttpsUrl
+
+    # Replace HTTPS URL with SSH URL in the git arguments
+    $sshGitArgs = $GitArgs | ForEach-Object {
+        if ($_ -eq $HttpsUrl -or $_ -match '^https://.*@github\.com/') {
+            $sshUrl
+        } else {
+            $_
+        }
+    }
+
+    # Execute with SSH
+    $sshGitCommand = @('git') + $sshGitArgs
+    & $sshGitCommand[0] $sshGitCommand[1..($sshGitCommand.Length-1)] | Out-Null
+
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "✓ $SuccessMessage (SSH fallback)" -ForegroundColor Green
+        return $true
+    } else {
+        Write-Host "✗ SSH $Operation also failed (exit code: $LASTEXITCODE)" -ForegroundColor Red
+        Write-Host "$FailureMessage" -ForegroundColor Red
+
+        if ($ThrowOnFailure) {
+            throw "Both HTTPS and SSH $Operation failed"
+        }
+        return $false
+    }
+}
 
 # Cleanup function
 function Invoke-Cleanup {
@@ -147,12 +222,11 @@ try {
     Write-Host ""
     Write-Host "Cloning source repository..." -ForegroundColor Cyan
     try {
-        git clone $SourceRepoUrl $RepoName
-        if ($LASTEXITCODE -ne 0) {
-            throw "Git clone failed"
+        $cloneSuccess = Invoke-GitWithFallback -Operation "clone" -HttpsUrl $SourceRepoUrl -GitArgs @("clone", $SourceRepoUrl, $RepoName) -SuccessMessage "Repository cloned successfully" -FailureMessage "Failed to clone repository with both HTTPS and SSH" -ThrowOnFailure
+
+        if ($cloneSuccess) {
+            $script:RepoDirectoryCreated = $true
         }
-        $script:RepoDirectoryCreated = $true
-        Write-Host "Repository cloned successfully" -ForegroundColor Green
     } catch {
         Write-Host "Error: Failed to clone repository - $_" -ForegroundColor Red
         throw
@@ -198,8 +272,7 @@ try {
     Write-Host "Adding GitHub remote..." -ForegroundColor Cyan
     $GitHubRepoUrl = "https://github.com/$GitHubOrgName/$DestRepoName.git"
     try {
-        git remote add github $GitHubRepoUrl
-        Write-Host "GitHub remote added: $GitHubRepoUrl" -ForegroundColor Green
+        Invoke-GitWithFallback -Operation "remote add" -HttpsUrl $GitHubRepoUrl -GitArgs @("remote", "add", "github", $GitHubRepoUrl) -SuccessMessage "GitHub remote added: $GitHubRepoUrl" -FailureMessage "Failed to add GitHub remote with both HTTPS and SSH" -ThrowOnFailure | Out-Null
     } catch {
         Write-Host "Error: Failed to add GitHub remote - $_" -ForegroundColor Red
         throw
@@ -232,15 +305,13 @@ try {
             if ($LASTEXITCODE -ne 0) {
                 git checkout $branch 2>$null
             }
-            
-            # Push to GitHub with embedded credentials
+
+            # Push to GitHub with HTTPS-to-SSH fallback
             $AuthUrl = "https://$GitHubUsername`:$script:PlainTextToken@github.com/$GitHubOrgName/$DestRepoName.git"
-            git push $AuthUrl $branch
-            
-            if ($LASTEXITCODE -eq 0) {
-                Write-Host "Successfully pushed branch: $branch" -ForegroundColor Green
-            } else {
-                Write-Host "Warning: Failed to push branch: $branch" -ForegroundColor Yellow
+            $pushSuccess = Invoke-GitWithFallback -Operation "push branch" -HttpsUrl $AuthUrl -GitArgs @("push", $AuthUrl, $branch) -SuccessMessage "Successfully pushed branch: $branch" -FailureMessage "Failed to push branch: $branch"
+
+            if (-not $pushSuccess) {
+                Write-Host "Warning: Failed to push branch: $branch with both HTTPS and SSH" -ForegroundColor Yellow
             }
         } catch {
             Write-Host "Warning: Error processing branch $branch - $_" -ForegroundColor Yellow
@@ -260,16 +331,25 @@ try {
         Write-Host "Pushing all tags to GitHub..." -ForegroundColor Cyan
         try {
             $AuthUrl = "https://$GitHubUsername`:$script:PlainTextToken@github.com/$GitHubOrgName/$DestRepoName.git"
-            $pushOutput = git push $AuthUrl --tags 2>&1
+            $tagPushSuccess = Invoke-GitWithFallback -Operation "push tags" -HttpsUrl $AuthUrl -GitArgs @("push", $AuthUrl, "--tags") -SuccessMessage "All $tagCount tag(s) pushed successfully" -FailureMessage "Failed to push tags"
 
-            if ($LASTEXITCODE -eq 0) {
-                Write-Host "✓ All $tagCount tag(s) pushed successfully" -ForegroundColor Green
-
+            if ($tagPushSuccess) {
                 # Verify tags were pushed by checking remote tags
                 Write-Host "Verifying tag migration..." -ForegroundColor Cyan
+
+                # Try HTTPS first, then SSH for verification
+                $sshUrl = Convert-HttpsToSsh -HttpsUrl $AuthUrl
                 $remoteTags = git ls-remote --tags $AuthUrl 2>$null | ForEach-Object {
                     if ($_ -match 'refs/tags/(.+)$') { $matches[1] }
                 } | Where-Object { $_ -notmatch '\^{}$' }
+
+                # If HTTPS verification failed, try SSH
+                if (-not $remoteTags) {
+                    Write-Host "HTTPS tag verification failed, trying SSH..." -ForegroundColor Yellow
+                    $remoteTags = git ls-remote --tags $sshUrl 2>$null | ForEach-Object {
+                        if ($_ -match 'refs/tags/(.+)$') { $matches[1] }
+                    } | Where-Object { $_ -notmatch '\^{}$' }
+                }
 
                 if ($remoteTags) {
                     $remoteTagCount = ($remoteTags | Measure-Object).Count
@@ -279,11 +359,10 @@ try {
                         Write-Host "⚠ Warning: Tag count mismatch - Local: $tagCount, Remote: $remoteTagCount" -ForegroundColor Yellow
                     }
                 } else {
-                    Write-Host "⚠ Warning: Could not verify remote tags" -ForegroundColor Yellow
+                    Write-Host "⚠ Warning: Could not verify remote tags with either HTTPS or SSH" -ForegroundColor Yellow
                 }
             } else {
-                Write-Host "⚠ Warning: Tag push failed with exit code $LASTEXITCODE" -ForegroundColor Yellow
-                Write-Host "Push output: $pushOutput" -ForegroundColor Yellow
+                Write-Host "⚠ Warning: Failed to push tags with both HTTPS and SSH" -ForegroundColor Yellow
             }
         } catch {
             Write-Host "⚠ Warning: Error pushing tags - $_" -ForegroundColor Yellow
@@ -330,7 +409,7 @@ try {
                 "default_branch" = $defaultBranch
             } | ConvertTo-Json
 
-            $response = Invoke-RestMethod -Uri $apiUrl -Method PATCH -Headers $headers -Body $body -ContentType "application/json"
+            Invoke-RestMethod -Uri $apiUrl -Method PATCH -Headers $headers -Body $body -ContentType "application/json" | Out-Null
             Write-Host "✓ Default branch successfully set to '$defaultBranch'" -ForegroundColor Green
         } catch {
             $errorMessage = $_.Exception.Message
