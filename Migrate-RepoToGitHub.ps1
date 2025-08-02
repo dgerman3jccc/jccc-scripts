@@ -71,6 +71,84 @@ function Convert-HttpsToSsh {
     return $HttpsUrl
 }
 
+# Helper function to create repository on GitHub
+function New-GitHubRepository {
+    param(
+        [string]$OrgName,
+        [string]$RepoName,
+        [string]$AccessToken,
+        [string]$Description = "Migrated repository"
+    )
+
+    Write-Host "Creating repository '$RepoName' in organization '$OrgName'..." -ForegroundColor Cyan
+
+    try {
+        # Check if repository already exists
+        $checkUrl = "https://api.github.com/repos/$OrgName/$RepoName"
+        $checkHeaders = @{
+            "Authorization" = "token $AccessToken"
+            "Accept" = "application/vnd.github.v3+json"
+            "User-Agent" = "PowerShell-Migration-Script"
+        }
+
+        try {
+            Invoke-RestMethod -Uri $checkUrl -Method GET -Headers $checkHeaders | Out-Null
+            Write-Host "✓ Repository already exists: https://github.com/$OrgName/$RepoName" -ForegroundColor Yellow
+            return $true
+        } catch {
+            # Repository doesn't exist, which is what we want
+            if ($_.Exception.Response.StatusCode.value__ -eq 404) {
+                Write-Host "Repository doesn't exist yet - proceeding with creation..." -ForegroundColor Green
+            } else {
+                Write-Host "Warning: Could not check if repository exists - $_" -ForegroundColor Yellow
+            }
+        }
+
+        # Create the repository
+        $createUrl = "https://api.github.com/orgs/$OrgName/repos"
+        $createHeaders = @{
+            "Authorization" = "token $AccessToken"
+            "Accept" = "application/vnd.github.v3+json"
+            "User-Agent" = "PowerShell-Migration-Script"
+        }
+        $createBody = @{
+            "name" = $RepoName
+            "description" = $Description
+            "private" = $false
+            "has_issues" = $true
+            "has_projects" = $true
+            "has_wiki" = $true
+        } | ConvertTo-Json
+
+        $newRepo = Invoke-RestMethod -Uri $createUrl -Method POST -Headers $createHeaders -Body $createBody -ContentType "application/json"
+        Write-Host "✓ Repository created successfully: $($newRepo.html_url)" -ForegroundColor Green
+        return $true
+
+    } catch {
+        $errorMessage = $_.Exception.Message
+        if ($_.Exception.Response) {
+            $statusCode = $_.Exception.Response.StatusCode.value__
+            Write-Host "✗ Failed to create repository (HTTP $statusCode): $errorMessage" -ForegroundColor Red
+
+            # Try to get more detailed error information
+            try {
+                $errorStream = $_.Exception.Response.GetResponseStream()
+                $reader = New-Object System.IO.StreamReader($errorStream)
+                $errorBody = $reader.ReadToEnd()
+                $errorJson = $errorBody | ConvertFrom-Json
+                if ($errorJson.message) {
+                    Write-Host "GitHub API Error: $($errorJson.message)" -ForegroundColor Red
+                }
+            } catch {
+                # Ignore errors when trying to read error details
+            }
+        } else {
+            Write-Host "✗ Failed to create repository: $errorMessage" -ForegroundColor Red
+        }
+        return $false
+    }
+}
+
 # Helper function to execute Git commands with HTTPS-to-SSH fallback
 function Invoke-GitWithFallback {
     param(
@@ -265,6 +343,14 @@ try {
         }
     } catch {
         Write-Host "Warning: Could not rename branch - $_" -ForegroundColor Yellow
+    }
+
+    # Create GitHub repository
+    Write-Host ""
+    $repoCreated = New-GitHubRepository -OrgName $GitHubOrgName -RepoName $DestRepoName -AccessToken $script:PlainTextToken -Description "Migrated from $SourceRepoUrl"
+    if (-not $repoCreated) {
+        Write-Host "Error: Failed to create GitHub repository" -ForegroundColor Red
+        throw "Failed to create GitHub repository"
     }
 
     # Add GitHub remote
