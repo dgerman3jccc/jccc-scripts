@@ -788,20 +788,28 @@ function Invoke-Phase1 {
             }
 
             try {
-                # Checkout branch (capture output to avoid treating informational messages as errors)
-                $checkoutOutput = git checkout $branch 2>&1
-                if ($LASTEXITCODE -ne 0 -and $checkoutOutput -notmatch "Switched to|Already on") {
-                    Write-Warning "Failed to checkout branch: $branch"
-                    $errorCount++
-                    continue
-                }
+                # Suppress PowerShell error handling for Git operations
+                $oldErrorActionPreference = $ErrorActionPreference
+                $ErrorActionPreference = 'SilentlyContinue'
 
-                # Copy .vscode from default branch
-                $copyOutput = git checkout $DefaultBranch -- .vscode 2>&1
-                if ($LASTEXITCODE -ne 0 -and $copyOutput -notmatch "Updated|Already up to date") {
-                    Write-Warning "Failed to copy .vscode to branch: $branch"
-                    $errorCount++
-                    continue
+                try {
+                    # Checkout branch
+                    git checkout $branch *>$null
+                    if ($LASTEXITCODE -ne 0) {
+                        Write-Warning "Failed to checkout branch: $branch"
+                        $errorCount++
+                        continue
+                    }
+
+                    # Copy .vscode from default branch
+                    git checkout $DefaultBranch -- .vscode *>$null
+                    if ($LASTEXITCODE -ne 0) {
+                        Write-Warning "Failed to copy .vscode to branch: $branch"
+                        $errorCount++
+                        continue
+                    }
+                } finally {
+                    $ErrorActionPreference = $oldErrorActionPreference
                 }
 
                 # Check for changes
@@ -830,12 +838,13 @@ function Invoke-Phase1 {
             }
             catch {
                 # Only treat as error if it's not a Git informational message
-                if ($_.Exception.Message -notmatch "Switched to|Already on|branch.*set up to track") {
-                    Write-Warning "Error processing branch $branch`: $_"
+                $errorMessage = $_.Exception.Message
+                if ($errorMessage -notmatch "Switched to|Already on|branch.*set up to track|Cloning into") {
+                    Write-Warning "Error processing branch $branch`: $errorMessage"
                     $errorCount++
                 } else {
                     # This is just Git being informative, not an actual error
-                    Write-Info "Git info for branch $branch`: $($_.Exception.Message)"
+                    Write-Info "Git completed operation for branch $branch"
                 }
             }
         }
@@ -843,8 +852,14 @@ function Invoke-Phase1 {
         # Return to default branch
         $currentBranch = git branch --show-current
         if ($currentBranch -ne $DefaultBranch) {
-            $returnOutput = git checkout $DefaultBranch 2>&1
-            # Don't treat "Switched to branch" as an error
+            # Suppress all error handling for this specific Git command
+            $oldErrorActionPreference = $ErrorActionPreference
+            $ErrorActionPreference = 'SilentlyContinue'
+            try {
+                git checkout $DefaultBranch *>$null
+            } finally {
+                $ErrorActionPreference = $oldErrorActionPreference
+            }
         }
 
         Write-Info "Branch synchronization summary:"
@@ -944,8 +959,14 @@ function Invoke-GitCommitAndPush {
         # Ensure we're on the default branch
         $currentBranch = git branch --show-current
         if ($currentBranch -ne $DefaultBranch) {
-            $checkoutOutput = git checkout $DefaultBranch 2>&1
-            # Don't treat "Switched to branch" as an error
+            # Suppress PowerShell error handling for Git checkout
+            $oldErrorActionPreference = $ErrorActionPreference
+            $ErrorActionPreference = 'SilentlyContinue'
+            try {
+                git checkout $DefaultBranch *>$null
+            } finally {
+                $ErrorActionPreference = $oldErrorActionPreference
+            }
         }
 
         # Add all new files
