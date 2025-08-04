@@ -1,30 +1,41 @@
 ﻿# Migrate-RepoToGitHub.ps1
-# Interactive script to migrate a Git repository to GitHub
+# Script to migrate a Git repository to GitHub using environment variables for security
 
 param(
+    [Parameter(Position=0, HelpMessage="Source repository URL to migrate")]
+    [string]$SourceRepoUrl,
     [switch]$KeepLocalRepo,
     [switch]$Help
 )
+
+# Hard-coded target organization
+$TARGET_GITHUB_ORG = "oop-jccc"
 
 # Show help if requested
 if ($Help) {
     Write-Host "=== Git Repository Migration to GitHub - Help ===" -ForegroundColor Green
     Write-Host ""
-    Write-Host "This script migrates a Git repository to GitHub with automatic cleanup functionality." -ForegroundColor White
+    Write-Host "This script migrates a Git repository to GitHub using environment variables for security." -ForegroundColor White
     Write-Host ""
     Write-Host "Features:" -ForegroundColor Yellow
     Write-Host "  • Migrates all branches (excluding feature/bugfix/fix branches)" -ForegroundColor White
     Write-Host "  • Migrates all repository tags with verification" -ForegroundColor White
     Write-Host "  • Sets appropriate default branch on GitHub (main > master > first available)" -ForegroundColor White
     Write-Host "  • Automatic cleanup of temporary local repository" -ForegroundColor White
+    Write-Host "  • Uses environment variable for secure PAT handling" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Prerequisites:" -ForegroundColor Yellow
+    Write-Host "  • Set GIT_PAT environment variable with your GitHub Personal Access Token" -ForegroundColor White
+    Write-Host "  • Target organization: $TARGET_GITHUB_ORG" -ForegroundColor White
     Write-Host ""
     Write-Host "Parameters:" -ForegroundColor Yellow
+    Write-Host "  SourceRepoUrl     Source repository URL to migrate (required)" -ForegroundColor White
     Write-Host "  -KeepLocalRepo    Skip automatic cleanup of the local repository directory" -ForegroundColor White
     Write-Host "  -Help             Show this help message" -ForegroundColor White
     Write-Host ""
     Write-Host "Example usage:" -ForegroundColor Yellow
-    Write-Host "  .\Migrate-RepoToGitHub.ps1                    # Normal execution with automatic cleanup" -ForegroundColor White
-    Write-Host "  .\Migrate-RepoToGitHub.ps1 -KeepLocalRepo     # Keep local repo for verification/debugging" -ForegroundColor White
+    Write-Host "  Migrate-RepoToGitHub.ps1 https://github.com/source/repo.git" -ForegroundColor White
+    Write-Host "  Migrate-RepoToGitHub.ps1 -KeepLocalRepo https://github.com/source/repo.git" -ForegroundColor White
     Write-Host ""
     exit 0
 }
@@ -37,23 +48,69 @@ $script:ChangedToRepoDirectory = $false
 Write-Host "=== Git Repository Migration to GitHub ===" -ForegroundColor Green
 Write-Host ""
 
-# Interactive Prompts
-Write-Host "This script will help you migrate a Git repository to GitHub." -ForegroundColor Yellow
-Write-Host ""
+# Validate environment variable for PAT
+Write-Host "Checking environment variables..." -ForegroundColor Yellow
 
-# Prompt for Source Repository URL
-$SourceRepoUrl = Read-Host "Please enter the full source repository URL to clone"
+# Check if the environment variable exists
+if (-not (Test-Path env:GIT_PAT)) {
+    Write-Host "ERROR: GIT_PAT environment variable is not set!" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Please set your GitHub Personal Access Token as an environment variable:" -ForegroundColor Yellow
+    Write-Host "  PowerShell: `$env:GIT_PAT = 'your_token_here'" -ForegroundColor White
+    Write-Host "  Command Prompt: set GIT_PAT=your_token_here" -ForegroundColor White
+    Write-Host "  System Environment Variables: Add GIT_PAT with your token value" -ForegroundColor White
+    Write-Host ""
+    Write-Host "For security reasons, this script does not accept PAT as a parameter." -ForegroundColor Yellow
+    exit 1
+}
 
-# Prompt for GitHub Organization
-Write-Host ""
-$GitHubOrgName = Read-Host "Please enter the target GitHub organization name (e.g., 'oop-jccc', 'HylandSoftware')"
+# Check if the environment variable is empty
+if ([string]::IsNullOrWhiteSpace($env:GIT_PAT)) {
+    Write-Host "ERROR: GIT_PAT environment variable is empty!" -ForegroundColor Red
+    Write-Host "Please ensure the GIT_PAT environment variable contains your GitHub Personal Access Token." -ForegroundColor Yellow
+    exit 1
+}
 
-# Prompt for GitHub Personal Access Token (hidden input)
-Write-Host ""
-$SecureToken = Read-Host "Please enter your GitHub Personal Access Token (PAT)" -AsSecureString
+Write-Host "SUCCESS: GIT_PAT environment variable found" -ForegroundColor Green
+
+# Validate source repository URL
+if ([string]::IsNullOrWhiteSpace($SourceRepoUrl)) {
+    Write-Host "ERROR: Source repository URL is required!" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Usage:" -ForegroundColor Yellow
+    Write-Host "  Migrate-RepoToGitHub.ps1 <source-repo-url>" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Example:" -ForegroundColor Yellow
+    Write-Host "  Migrate-RepoToGitHub.ps1 https://github.com/source/repo.git" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Use -Help for more information." -ForegroundColor Yellow
+    exit 1
+}
+
+# Basic URL validation
+if ($SourceRepoUrl -notmatch '^https?://.*\.git$|^git@.*\.git$|^https?://github\.com/.*$') {
+    Write-Host "WARNING: Source repository URL format may be invalid." -ForegroundColor Yellow
+    Write-Host "Expected formats: https://github.com/user/repo.git or git@github.com:user/repo.git" -ForegroundColor Yellow
+    $confirm = Read-Host "Continue anyway? (y/N)"
+    if ($confirm -ne 'y' -and $confirm -ne 'Y') {
+        Write-Host "Migration cancelled." -ForegroundColor Yellow
+        exit 0
+    }
+}
+
+# Set values from environment and constants
+$GitHubOrgName = $TARGET_GITHUB_ORG
+$script:PlainTextToken = $env:GIT_PAT
 
 # Hardcoded Values
 $GitHubUsername = "d-german"
+
+Write-Host ""
+Write-Host "Configuration:" -ForegroundColor Yellow
+Write-Host "  • Source Repository: $SourceRepoUrl" -ForegroundColor White
+Write-Host "  • Target Organization: $GitHubOrgName" -ForegroundColor White
+Write-Host "  • GitHub PAT: [LOADED FROM ENVIRONMENT]" -ForegroundColor White
+Write-Host ""
 
 # Helper function to convert HTTPS URL to SSH format
 function Convert-HttpsToSsh {
@@ -167,12 +224,12 @@ function Invoke-GitWithFallback {
     & $gitCommand[0] $gitCommand[1..($gitCommand.Length-1)] | Out-Null
 
     if ($LASTEXITCODE -eq 0) {
-        Write-Host "✓ $SuccessMessage (HTTPS)" -ForegroundColor Green
+        Write-Host "SUCCESS: $SuccessMessage (HTTPS)" -ForegroundColor Green
         return $true
     }
 
     # HTTPS failed, try SSH fallback
-    Write-Host "⚠ HTTPS $Operation failed (exit code: $LASTEXITCODE)" -ForegroundColor Yellow
+    Write-Host "WARNING: HTTPS $Operation failed (exit code: $LASTEXITCODE)" -ForegroundColor Yellow
     Write-Host "Attempting $Operation using SSH fallback..." -ForegroundColor Cyan
 
     # Convert HTTPS URL to SSH format
@@ -192,10 +249,10 @@ function Invoke-GitWithFallback {
     & $sshGitCommand[0] $sshGitCommand[1..($sshGitCommand.Length-1)] | Out-Null
 
     if ($LASTEXITCODE -eq 0) {
-        Write-Host "✓ $SuccessMessage (SSH fallback)" -ForegroundColor Green
+        Write-Host "SUCCESS: $SuccessMessage (SSH fallback)" -ForegroundColor Green
         return $true
     } else {
-        Write-Host "✗ SSH $Operation also failed (exit code: $LASTEXITCODE)" -ForegroundColor Red
+        Write-Host "ERROR: SSH $Operation also failed (exit code: $LASTEXITCODE)" -ForegroundColor Red
         Write-Host "$FailureMessage" -ForegroundColor Red
 
         if ($ThrowOnFailure) {
@@ -224,11 +281,7 @@ function Invoke-Cleanup {
     if ($script:PlainTextToken) {
         $script:PlainTextToken = $null
         [System.GC]::Collect()
-        Write-Host "✓ Personal Access Token cleared from memory" -ForegroundColor Green
-    }
-    if ($SecureToken) {
-        $SecureToken.Dispose()
-        Write-Host "✓ Secure token disposed" -ForegroundColor Green
+        Write-Host "SUCCESS: Personal Access Token cleared from memory" -ForegroundColor Green
     }
     
     # Return to original directory if we changed directories
@@ -236,9 +289,9 @@ function Invoke-Cleanup {
         Write-Host "Returning to original directory..." -ForegroundColor Cyan
         try {
             Set-Location $script:OriginalLocation
-            Write-Host "✓ Returned to original directory: $($script:OriginalLocation)" -ForegroundColor Green
+            Write-Host "SUCCESS: Returned to original directory: $($script:OriginalLocation)" -ForegroundColor Green
         } catch {
-            Write-Host "⚠ Warning: Could not return to original directory - $_" -ForegroundColor Yellow
+            Write-Host "WARNING: Could not return to original directory - $_" -ForegroundColor Yellow
         }
     }
     
@@ -255,9 +308,9 @@ function Invoke-Cleanup {
                     }
                 }
                 Remove-Item $repoPath -Recurse -Force
-                Write-Host "✓ Local repository directory removed: $repoPath" -ForegroundColor Green
+                Write-Host "SUCCESS: Local repository directory removed: $repoPath" -ForegroundColor Green
             } catch {
-                Write-Host "⚠ Warning: Could not remove local repository directory - $_" -ForegroundColor Yellow
+                Write-Host "WARNING: Could not remove local repository directory - $_" -ForegroundColor Yellow
                 Write-Host "  You may need to manually delete: $repoPath" -ForegroundColor Yellow
             }
         }
@@ -271,8 +324,7 @@ Write-Host "Starting migration process..." -ForegroundColor Green
 
 # Main script execution with error handling
 try {
-    # Convert secure string token to plain text
-    $script:PlainTextToken = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureToken))
+    # Token is already set from environment variable
 
     # Extract repository name from source URL
     Write-Host "Extracting repository name from source URL..." -ForegroundColor Cyan
@@ -285,25 +337,28 @@ try {
         throw "Could not extract repository name from URL"
     }
 
-    # Prompt for destination repository name
+    # Use source repository name for destination
+    $DestRepoName = $RepoName
     Write-Host ""
-    Write-Host "The source repository name is: $RepoName" -ForegroundColor Yellow
-    $DestRepoName = Read-Host "Please enter the destination repository name (press Enter to use '$RepoName')"
-    if ([string]::IsNullOrWhiteSpace($DestRepoName)) {
-        $DestRepoName = $RepoName
-        Write-Host "Using source repository name for destination: $DestRepoName" -ForegroundColor Green
-    } else {
-        Write-Host "Destination repository name set to: $DestRepoName" -ForegroundColor Green
-    }
+    Write-Host "Repository name: $RepoName" -ForegroundColor Yellow
+    Write-Host "Destination repository: $DestRepoName" -ForegroundColor Green
 
     # Clone the source repository
     Write-Host ""
     Write-Host "Cloning source repository..." -ForegroundColor Cyan
     try {
+        # Check if directory will be created (Git creates it even on failure)
+        $repoPath = Join-Path (Get-Location) $RepoName
+
         $cloneSuccess = Invoke-GitWithFallback -Operation "clone" -HttpsUrl $SourceRepoUrl -GitArgs @("clone", $SourceRepoUrl, $RepoName) -SuccessMessage "Repository cloned successfully" -FailureMessage "Failed to clone repository with both HTTPS and SSH" -ThrowOnFailure
 
-        if ($cloneSuccess) {
+        # Check if directory was created (even on failure, Git might create an empty directory)
+        if (Test-Path $repoPath) {
             $script:RepoDirectoryCreated = $true
+        }
+
+        if (-not $cloneSuccess) {
+            throw "Clone operation failed"
         }
     } catch {
         Write-Host "Error: Failed to clone repository - $_" -ForegroundColor Red
@@ -533,8 +588,8 @@ try {
     Invoke-Cleanup -SkipRepoCleanup:$KeepLocalRepo -IsErrorCleanup:$true
     exit 1
 } finally {
-    # Always perform cleanup on successful completion
-    if (-not $Error.Count) {
+    # Always perform cleanup on successful completion (only if no exception was thrown)
+    if ($? -and -not $Error.Count) {
         # Determine if we should clean up the repository (automatic cleanup by default)
         $shouldCleanupRepo = -not $KeepLocalRepo
 
