@@ -261,7 +261,9 @@ function New-BackupDirectory {
 function Get-VSCodeTasksTemplate {
     param([object]$MainProject)
     
+    # Use forward slashes consistently for cross-platform compatibility
     $projectPath = if ($MainProject.Directory) { "$($MainProject.Directory)/$($MainProject.Name).csproj" } else { "$($MainProject.Name).csproj" }
+    $projectPath = $projectPath -replace '\\', '/'
     
     return @"
 {
@@ -370,6 +372,8 @@ function Get-VSCodeLaunchTemplate {
 
     $projectName = $MainProject.Name
     $projectDir = if ($MainProject.Directory) { $MainProject.Directory } else { "." }
+    # Normalize path separators for cross-platform compatibility
+    $projectDir = $projectDir -replace '\\', '/'
 
     return @"
 {
@@ -400,6 +404,8 @@ function Get-DevContainerTemplate {
     param([object]$MainProject)
 
     $projectPath = if ($MainProject.Directory) { "$($MainProject.Directory)/$($MainProject.Name).csproj" } else { "$($MainProject.Name).csproj" }
+    # Normalize path separators for cross-platform compatibility
+    $projectPath = $projectPath -replace '\\', '/'
 
     return @"
 {
@@ -437,6 +443,8 @@ function Get-GitHubActionsTemplate {
     param([object]$MainProject)
 
     $projectPath = if ($MainProject.Directory) { "$($MainProject.Directory)/$($MainProject.Name).csproj" } else { "$($MainProject.Name).csproj" }
+    # Normalize path separators for cross-platform compatibility
+    $projectPath = $projectPath -replace '\\', '/'
 
     return @"
 name: .NET CI/CD Pipeline
@@ -536,6 +544,44 @@ jobs:
       run: |
         echo "Security scan would run here"
         echo "Consider adding tools like Snyk, OWASP dependency check, or GitHub security scanning"
+"@
+}
+
+function Get-GitAttributesTemplate {
+    return @"
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Explicitly declare text files you want to always be normalized and converted
+# to native line endings on checkout.
+*.cs text
+*.csproj text
+*.sln text
+*.json text
+*.yml text
+*.yaml text
+*.md text
+*.txt text
+*.ps1 text
+
+# Declare files that will always have CRLF line endings on checkout.
+*.bat text eol=crlf
+
+# Declare files that will always have LF line endings on checkout.
+*.sh text eol=lf
+
+# Denote all files that are truly binary and should not be modified.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.dll binary
+*.exe binary
+*.zip binary
+*.7z binary
+*.tar binary
+*.gz binary
 "@
 }
 
@@ -717,7 +763,8 @@ function Invoke-Phase0 {
     $filesToCreate = @(
         @{ Path = ".vscode/tasks.json"; Template = Get-VSCodeTasksTemplate $MainProject },
         @{ Path = ".vscode/launch.json"; Template = Get-VSCodeLaunchTemplate $MainProject },
-        @{ Path = ".devcontainer/devcontainer.json"; Template = Get-DevContainerTemplate $MainProject }
+        @{ Path = ".devcontainer/devcontainer.json"; Template = Get-DevContainerTemplate $MainProject },
+        @{ Path = ".gitattributes"; Template = Get-GitAttributesTemplate }
     )
 
     foreach ($file in $filesToCreate) {
@@ -783,7 +830,7 @@ function Invoke-Phase1 {
             Write-Info "Processing branch: $branch"
 
             if ($DryRun) {
-                Write-Info "Would synchronize .vscode to branch: $branch"
+                Write-Info "Would synchronize .vscode and .devcontainer to branch: $branch"
                 continue
             }
 
@@ -793,18 +840,22 @@ function Invoke-Phase1 {
                 $ErrorActionPreference = 'SilentlyContinue'
 
                 try {
-                    # Checkout branch
-                    git checkout $branch *>$null
+                    # Checkout branch (create local tracking branch if needed)
+                    git checkout -B $branch origin/$branch 2>$null
                     if ($LASTEXITCODE -ne 0) {
-                        Write-Warning "Failed to checkout branch: $branch"
-                        $errorCount++
-                        continue
+                        # Fallback: try regular checkout if branch already exists locally
+                        git checkout $branch 2>$null
+                        if ($LASTEXITCODE -ne 0) {
+                            Write-Warning "Failed to checkout branch: $branch"
+                            $errorCount++
+                            continue
+                        }
                     }
 
-                    # Copy .vscode from default branch
-                    git checkout $DefaultBranch -- .vscode *>$null
+                    # Copy .vscode and .devcontainer from default branch
+                    git checkout $DefaultBranch -- .vscode .devcontainer 2>$null
                     if ($LASTEXITCODE -ne 0) {
-                        Write-Warning "Failed to copy .vscode to branch: $branch"
+                        Write-Warning "Failed to copy .vscode and .devcontainer to branch: $branch"
                         $errorCount++
                         continue
                     }
@@ -813,16 +864,16 @@ function Invoke-Phase1 {
                 }
 
                 # Check for changes
-                $status = git status --porcelain | Where-Object { $_ -match "\.vscode" }
+                $status = git status --porcelain | Where-Object { $_ -match "\.vscode|\.devcontainer" }
                 if ($status) {
-                    git add .vscode/ 2>$null
-                    git commit -m "feat: Synchronize VS Code build/debug configuration" 2>$null
+                    git add .vscode/ .devcontainer/ 2>$null
+                    git commit -m "feat: Synchronize VS Code and DevContainer configurations" 2>$null
                     if ($LASTEXITCODE -eq 0) {
                         git push 2>$null
                         if ($LASTEXITCODE -eq 0) {
                             Write-Success "Updated branch: $branch"
                             $successCount++
-                            $script:Changes += "Synchronized .vscode to branch: $branch"
+                            $script:Changes += "Synchronized .vscode and .devcontainer to branch: $branch"
                         } else {
                             Write-Warning "Failed to push to branch: $branch"
                             $errorCount++
@@ -969,29 +1020,36 @@ function Invoke-GitCommitAndPush {
             }
         }
 
-        # Add all new files
-        git add .vscode/ .devcontainer/ .github/ README.md 2>$null
+        # Add all new files (suppress line ending warnings)
+        $oldErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'SilentlyContinue'
+        try {
+            git add .vscode/ .devcontainer/ .github/ README.md .gitattributes *>$null
 
-        # Check if there are changes to commit
-        $status = git status --porcelain
-        if ($status) {
-            git commit -m "feat: Add comprehensive .NET development environment configuration" 2>$null
-            if ($LASTEXITCODE -eq 0) {
-                Write-Success "Changes committed successfully"
-
-                # Push changes
-                git push 2>$null
+            # Check if there are changes to commit
+            $status = git status --porcelain
+            if ($status) {
+                # Commit with line ending warning suppression
+                git commit -m "feat: Add comprehensive .NET development environment configuration" *>$null
                 if ($LASTEXITCODE -eq 0) {
-                    Write-Success "Changes pushed to remote repository"
-                    $script:Changes += "Committed and pushed all changes"
+                    Write-Success "Changes committed successfully"
+
+                    # Push changes
+                    git push *>$null
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Success "Changes pushed to remote repository"
+                        $script:Changes += "Committed and pushed all changes"
+                    } else {
+                        Write-Warning "Failed to push changes to remote repository"
+                    }
                 } else {
-                    Write-Warning "Failed to push changes to remote repository"
+                    Write-Warning "Failed to commit changes"
                 }
             } else {
-                Write-Warning "Failed to commit changes"
+                Write-Info "No changes to commit"
             }
-        } else {
-            Write-Info "No changes to commit"
+        } finally {
+            $ErrorActionPreference = $oldErrorActionPreference
         }
     }
     finally {
