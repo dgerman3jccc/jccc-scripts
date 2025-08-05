@@ -20,6 +20,7 @@
 Write-Host "=== Example 1: Basic Usage ===" -ForegroundColor Green
 Write-Host "Update all .NET projects in the current repository to .NET 8.0 and C# 12"
 Write-Host "Also adds .idea/ to .gitignore to exclude JetBrains IDE files"
+Write-Host "Synchronizes .devcontainer folder for consistent Codespace environments"
 Write-Host "Command: .\Update-DotNetProjectsAllBranches.ps1 -RepositoryPath '.'"
 Write-Host ""
 
@@ -29,7 +30,7 @@ Write-Host ""
 # Example 2: Dry run - Preview changes without applying them
 Write-Host "=== Example 2: Dry Run Mode ===" -ForegroundColor Green
 Write-Host "Preview what changes would be made without actually modifying files"
-Write-Host "Shows which project files and .gitignore would be updated"
+Write-Host "Shows which project files, .gitignore, and .devcontainer would be updated"
 Write-Host "Command: .\Update-DotNetProjectsAllBranches.ps1 -RepositoryPath '.' -DryRun"
 Write-Host ""
 

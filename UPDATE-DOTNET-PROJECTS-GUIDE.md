@@ -2,7 +2,7 @@
 
 ## Overview
 
-The `Update-DotNetProjectsAllBranches.ps1` script automates the process of updating all .NET projects across every branch in a Git repository to use .NET 8.0 and C# 12, while also ensuring JetBrains IDE files are properly ignored. This script is designed for repository-wide modernization efforts.
+The `Update-DotNetProjectsAllBranches.ps1` script automates the process of updating all .NET projects across every branch in a Git repository to use .NET 8.0 and C# 12, while also ensuring JetBrains IDE files are properly ignored and development environments are consistent across branches. This script is designed for repository-wide modernization efforts.
 
 ## Features
 
@@ -10,6 +10,7 @@ The `Update-DotNetProjectsAllBranches.ps1` script automates the process of updat
 - **Comprehensive Project Discovery**: Finds all .NET project files (*.csproj, *.vbproj, *.fsproj)
 - **Safe XML Manipulation**: Validates XML structure before making changes
 - **GitIgnore Management**: Automatically adds .idea/ to .gitignore to exclude JetBrains IDE files
+- **DevContainer Synchronization**: Copies .devcontainer folder from main/default branch to ensure consistent Codespace environments
 - **Git Integration**: Commits and pushes changes with descriptive commit messages
 - **Security-First**: Uses environment variables for Git credentials
 - **Error Handling**: Gracefully handles branches without projects or XML parsing errors
@@ -101,10 +102,17 @@ For each branch, the script:
 - Adds `.idea/` entry if not present (to exclude JetBrains IDE files)
 - Preserves all existing .gitignore content
 
-### 5. Git Operations
+### 5. DevContainer Synchronization
+For each branch, the script:
+- Locates `.devcontainer` folder in the main/default branch (main, master, or develop)
+- Compares existing `.devcontainer` content in target branch
+- Synchronizes `.devcontainer` folder if differences are found
+- Ensures consistent GitHub Codespace environments across all branches
+
+### 6. Git Operations
 For branches with changes:
 - Stages all modified files
-- Commits with descriptive message (e.g., `"feat: Update .NET projects to net8.0 and C# 12; Add .idea/ to .gitignore"`)
+- Commits with descriptive message (e.g., `"feat: Update .NET projects to net8.0 and C# 12; Add .idea/ to .gitignore; Sync .devcontainer"`)
 - Pushes changes to remote repository (unless `-SkipPush` is specified)
 
 ## Example Project File Changes

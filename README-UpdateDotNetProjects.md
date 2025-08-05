@@ -1,6 +1,6 @@
 # .NET Projects Multi-Branch Updater
 
-A comprehensive PowerShell script suite for updating all .NET projects across every branch in a Git repository to .NET 8.0 and C# 12, while ensuring JetBrains IDE files are properly ignored.
+A comprehensive PowerShell script suite for updating all .NET projects across every branch in a Git repository to .NET 8.0 and C# 12, while ensuring JetBrains IDE files are properly ignored and development environments are consistent across branches.
 
 ## 📁 Files Included
 
@@ -34,6 +34,7 @@ $env:GIT_PAT = "your_github_personal_access_token_here"
 - **🔍 Smart Discovery**: Finds all .NET project files (*.csproj, *.vbproj, *.fsproj)
 - **🛡️ Safe Updates**: Validates XML structure before making changes
 - **📁 GitIgnore Management**: Automatically adds .idea/ to .gitignore for JetBrains IDEs
+- **🐳 DevContainer Sync**: Synchronizes .devcontainer folder for consistent Codespace environments
 - **📝 Git Integration**: Commits and pushes changes with descriptive messages
 - **🔐 Secure**: Uses environment variables for Git credentials
 - **🎯 Selective Processing**: Skips branches without .NET projects
@@ -49,7 +50,8 @@ For each .NET project file found:
 
 For each branch processed:
 - **GitIgnore**: Adds `.idea/` entry to exclude JetBrains IDE files
-- **Preserves**: All existing .gitignore content
+- **DevContainer**: Synchronizes `.devcontainer` folder from main/default branch
+- **Preserves**: All existing .gitignore content and other project settings
 
 ### Example Transformation
 ```xml

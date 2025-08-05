@@ -8,6 +8,7 @@
     - Discovering and updating every .NET project file (*.csproj, *.vbproj, *.fsproj)
     - Setting Target Framework to .NET 8.0 and C# Language Version to 12
     - Adding .idea/ to .gitignore to exclude JetBrains IDE files
+    - Synchronizing .devcontainer folder from main/default branch to ensure consistent Codespace environments
     - Committing and pushing changes for each branch with modifications
 
 .PARAMETER RepositoryPath
@@ -75,12 +76,16 @@ $TARGET_FRAMEWORK = "net8.0"
 $CSHARP_VERSION = "12"
 $PROJECT_EXTENSIONS = @("*.csproj", "*.vbproj", "*.fsproj")
 $GITIGNORE_ENTRY = ".idea/"
+$DEVCONTAINER_FOLDER = ".devcontainer"
+$DEFAULT_BRANCH_NAMES = @("main", "master", "develop")
 
 # Global variables
 $script:ProcessedBranches = @()
 $script:SkippedBranches = @()
 $script:ErrorBranches = @()
 $script:TotalProjectsUpdated = 0
+$script:DevcontainerSourcePath = $null
+$script:DevcontainerSourceBranch = $null
 
 # Prerequisites validation
 function Test-Prerequisites {
@@ -313,6 +318,169 @@ function Get-RelativePath {
     return $FullPath.Substring($BasePath.Length).TrimStart('\', '/')
 }
 
+# Find and cache the devcontainer source from the default branch
+function Initialize-DevcontainerSource {
+    Write-Info "Looking for .devcontainer folder in default branches..."
+
+    Push-Location $RepositoryPath
+    try {
+        # Store current branch
+        $currentBranch = git branch --show-current
+
+        # Try to find .devcontainer in default branches
+        foreach ($branchName in $DEFAULT_BRANCH_NAMES) {
+            # Check if branch exists locally or remotely
+            $localBranchExists = git branch --list $branchName
+            $remoteBranchExists = git branch -r --list "origin/$branchName"
+
+            if ($localBranchExists -or $remoteBranchExists) {
+                # Checkout the branch
+                if ($localBranchExists) {
+                    git checkout $branchName 2>$null | Out-Null
+                } else {
+                    git checkout -b $branchName origin/$branchName 2>$null | Out-Null
+                }
+
+                if ($LASTEXITCODE -eq 0) {
+                    $devcontainerPath = Join-Path $RepositoryPath $DEVCONTAINER_FOLDER
+                    if (Test-Path $devcontainerPath) {
+                        $script:DevcontainerSourcePath = $devcontainerPath
+                        $script:DevcontainerSourceBranch = $branchName
+                        Write-Success "Found .devcontainer folder in branch: $branchName"
+
+                        # Restore original branch
+                        if ($currentBranch -and $currentBranch -ne $branchName) {
+                            git checkout $currentBranch 2>$null | Out-Null
+                        }
+                        return $true
+                    }
+                }
+            }
+        }
+
+        # Restore original branch if we didn't find devcontainer
+        if ($currentBranch) {
+            git checkout $currentBranch 2>$null | Out-Null
+        }
+
+        Write-Warning "No .devcontainer folder found in default branches ($($DEFAULT_BRANCH_NAMES -join ', '))"
+        return $false
+
+    } catch {
+        Write-Error "Error while searching for .devcontainer source: $($_.Exception.Message)"
+        return $false
+    } finally {
+        Pop-Location
+    }
+}
+
+# Synchronize .devcontainer folder to current branch
+function Sync-DevcontainerFolder {
+    param([string]$BranchName)
+
+    # Skip if no devcontainer source found or if we're on the source branch
+    if (-not $script:DevcontainerSourcePath -or $BranchName -eq $script:DevcontainerSourceBranch) {
+        return $false
+    }
+
+    try {
+        # We need to get the devcontainer content from the source branch
+        # since we're currently on the target branch
+        Push-Location $RepositoryPath
+
+        # Store current branch
+        $currentBranch = git branch --show-current
+
+        # Temporarily switch to source branch to get devcontainer content
+        git checkout $script:DevcontainerSourceBranch 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Failed to checkout source branch $script:DevcontainerSourceBranch for devcontainer sync"
+            return $false
+        }
+
+        # Check if devcontainer exists in source branch
+        if (-not (Test-Path $script:DevcontainerSourcePath)) {
+            Write-Warning ".devcontainer folder not found in source branch $script:DevcontainerSourceBranch"
+            git checkout $currentBranch 2>$null | Out-Null
+            return $false
+        }
+
+        # Create temporary copy of devcontainer
+        $tempDevcontainerPath = Join-Path $env:TEMP "devcontainer-sync-$(Get-Random)"
+        Copy-Item -Path $script:DevcontainerSourcePath -Destination $tempDevcontainerPath -Recurse -Force
+
+        # Switch back to target branch
+        git checkout $currentBranch 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to return to branch $currentBranch"
+            Remove-Item -Path $tempDevcontainerPath -Recurse -Force -ErrorAction SilentlyContinue
+            return $false
+        }
+
+        $targetDevcontainerPath = Join-Path $RepositoryPath $DEVCONTAINER_FOLDER
+        $needsSync = $true
+
+        # Check if target already has .devcontainer and if it's different
+        if (Test-Path $targetDevcontainerPath) {
+            # Compare the folders to see if sync is needed
+            $sourceFiles = Get-ChildItem -Path $tempDevcontainerPath -Recurse -File
+            $needsSync = $false
+
+            foreach ($sourceFile in $sourceFiles) {
+                $relativePath = $sourceFile.FullName.Substring($tempDevcontainerPath.Length).TrimStart('\', '/')
+                $targetFile = Join-Path $targetDevcontainerPath $relativePath
+
+                if (-not (Test-Path $targetFile)) {
+                    $needsSync = $true
+                    break
+                }
+
+                # Compare file content
+                $sourceContent = Get-Content $sourceFile.FullName -Raw -ErrorAction SilentlyContinue
+                $targetContent = Get-Content $targetFile -Raw -ErrorAction SilentlyContinue
+
+                if ($sourceContent -ne $targetContent) {
+                    $needsSync = $true
+                    break
+                }
+            }
+        }
+
+        if (-not $needsSync) {
+            Write-Info ".devcontainer already up-to-date (Branch: $BranchName)"
+            Remove-Item -Path $tempDevcontainerPath -Recurse -Force -ErrorAction SilentlyContinue
+            return $false
+        }
+
+        if (-not $DryRun) {
+            # Remove existing .devcontainer folder if it exists
+            if (Test-Path $targetDevcontainerPath) {
+                Remove-Item -Path $targetDevcontainerPath -Recurse -Force -ErrorAction Stop
+            }
+
+            # Copy .devcontainer folder from temp location
+            Copy-Item -Path $tempDevcontainerPath -Destination $targetDevcontainerPath -Recurse -Force -ErrorAction Stop
+
+            # Verify the copy was successful
+            if (-not (Test-Path $targetDevcontainerPath)) {
+                throw "Failed to copy .devcontainer folder to target location"
+            }
+        }
+
+        # Clean up temp folder
+        Remove-Item -Path $tempDevcontainerPath -Recurse -Force -ErrorAction SilentlyContinue
+
+        Write-Success "Synchronized .devcontainer from $script:DevcontainerSourceBranch branch (Branch: $BranchName)"
+        return $true
+
+    } catch {
+        Write-Error "Failed to sync .devcontainer folder: $($_.Exception.Message)"
+        return $false
+    } finally {
+        Pop-Location
+    }
+}
+
 # Process a single branch
 function Process-Branch {
     param([string]$BranchName)
@@ -366,7 +534,10 @@ function Process-Branch {
         # Update .gitignore file
         $gitignoreUpdated = Update-GitIgnore $BranchName
 
-        if ($updatedCount -eq 0 -and -not $gitignoreUpdated) {
+        # Synchronize .devcontainer folder
+        $devcontainerUpdated = Sync-DevcontainerFolder $BranchName
+
+        if ($updatedCount -eq 0 -and -not $gitignoreUpdated -and -not $devcontainerUpdated) {
             Write-Info "No updates needed for branch: $BranchName"
             $script:SkippedBranches += $BranchName
             return $true
@@ -384,6 +555,9 @@ function Process-Branch {
             if ($gitignoreUpdated) {
                 $commitParts += "Add .idea/ to .gitignore"
             }
+            if ($devcontainerUpdated) {
+                $commitParts += "Sync .devcontainer"
+            }
             $commitMessage = "feat: " + ($commitParts -join "; ")
 
             git commit -m $commitMessage 2>$null
@@ -396,7 +570,10 @@ function Process-Branch {
                 if ($gitignoreUpdated) {
                     $changesSummary += ".gitignore update"
                 }
-                Write-Success "Committed $($changesSummary -join ' and ') in branch: $BranchName"
+                if ($devcontainerUpdated) {
+                    $changesSummary += ".devcontainer sync"
+                }
+                Write-Success "Committed $($changesSummary -join ', ') in branch: $BranchName"
 
                 # Push changes if not skipping
                 if (-not $SkipPush) {
@@ -419,7 +596,10 @@ function Process-Branch {
             if ($gitignoreUpdated) {
                 $dryRunSummary += ".gitignore update"
             }
-            Write-Info "Would commit $($dryRunSummary -join ' and ') in branch: $BranchName"
+            if ($devcontainerUpdated) {
+                $dryRunSummary += ".devcontainer sync"
+            }
+            Write-Info "Would commit $($dryRunSummary -join ', ') in branch: $BranchName"
         }
 
         $script:ProcessedBranches += $BranchName
@@ -455,6 +635,9 @@ try {
 
     # Validate prerequisites
     Test-Prerequisites
+
+    # Initialize devcontainer source
+    Initialize-DevcontainerSource | Out-Null
 
     # Get all branches
     $branches = Get-AllBranches
