@@ -5,6 +5,7 @@ param(
     [Parameter(Position=0, HelpMessage="Source repository URL to migrate")]
     [string]$SourceRepoUrl,
     [switch]$KeepLocalRepo,
+    [switch]$SetupForEnhancement,
     [switch]$Help
 )
 
@@ -22,6 +23,7 @@ if ($Help) {
     Write-Host "  • Migrates all repository tags with verification" -ForegroundColor White
     Write-Host "  • Sets appropriate default branch on GitHub (main > master > first available)" -ForegroundColor White
     Write-Host "  • Automatic cleanup of temporary local repository" -ForegroundColor White
+    Write-Host "  • Optional setup for immediate enhancement workflow" -ForegroundColor White
     Write-Host "  • Uses environment variable for secure PAT handling" -ForegroundColor White
     Write-Host ""
     Write-Host "Prerequisites:" -ForegroundColor Yellow
@@ -29,13 +31,15 @@ if ($Help) {
     Write-Host "  • Target organization: $TARGET_GITHUB_ORG" -ForegroundColor White
     Write-Host ""
     Write-Host "Parameters:" -ForegroundColor Yellow
-    Write-Host "  SourceRepoUrl     Source repository URL to migrate (required)" -ForegroundColor White
-    Write-Host "  -KeepLocalRepo    Skip automatic cleanup of the local repository directory" -ForegroundColor White
-    Write-Host "  -Help             Show this help message" -ForegroundColor White
+    Write-Host "  SourceRepoUrl         Source repository URL to migrate (required)" -ForegroundColor White
+    Write-Host "  -KeepLocalRepo        Skip automatic cleanup of the local repository directory" -ForegroundColor White
+    Write-Host "  -SetupForEnhancement  After migration, clone the new GitHub repo for immediate enhancement work" -ForegroundColor White
+    Write-Host "  -Help                 Show this help message" -ForegroundColor White
     Write-Host ""
     Write-Host "Example usage:" -ForegroundColor Yellow
     Write-Host "  Migrate-RepoToGitHub.ps1 https://github.com/source/repo.git" -ForegroundColor White
     Write-Host "  Migrate-RepoToGitHub.ps1 -KeepLocalRepo https://github.com/source/repo.git" -ForegroundColor White
+    Write-Host "  Migrate-RepoToGitHub.ps1 -SetupForEnhancement https://github.com/source/repo.git" -ForegroundColor White
     Write-Host ""
     exit 0
 }
@@ -319,6 +323,73 @@ function Invoke-Cleanup {
     Write-Host "Cleanup completed." -ForegroundColor Cyan
 }
 
+# Function to setup fresh clone for enhancement workflow
+function Invoke-EnhancementSetup {
+    param(
+        [string]$GitHubRepoUrl,
+        [string]$RepoName
+    )
+
+    Write-Host ""
+    Write-Host "=== Setting Up Repository for Enhancement Workflow ===" -ForegroundColor Green
+
+    # Return to original location
+    if ($script:ChangedToRepoDirectory) {
+        Write-Host "Returning to original directory..." -ForegroundColor Cyan
+        Set-Location $script:OriginalLocation
+    }
+
+    # Remove the source repository clone
+    $sourceRepoPath = Join-Path $script:OriginalLocation $RepoName
+    if (Test-Path $sourceRepoPath) {
+        Write-Host "Removing source repository clone..." -ForegroundColor Cyan
+        try {
+            # Force removal of read-only files that Git might create
+            Get-ChildItem $sourceRepoPath -Recurse -Force | ForEach-Object {
+                if ($_.Attributes -band [System.IO.FileAttributes]::ReadOnly) {
+                    $_.Attributes = $_.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)
+                }
+            }
+            Remove-Item $sourceRepoPath -Recurse -Force
+            Write-Host "SUCCESS: Source repository clone removed" -ForegroundColor Green
+        } catch {
+            Write-Host "WARNING: Could not remove source repository clone - $_" -ForegroundColor Yellow
+            Write-Host "  You may need to manually delete: $sourceRepoPath" -ForegroundColor Yellow
+        }
+    }
+
+    # Clone the new GitHub repository
+    Write-Host "Cloning the new GitHub repository for enhancement work..." -ForegroundColor Cyan
+    try {
+        $cloneSuccess = Invoke-GitWithFallback -Operation "clone for enhancement" -HttpsUrl $GitHubRepoUrl -GitArgs @("clone", $GitHubRepoUrl, $RepoName) -SuccessMessage "GitHub repository cloned successfully" -FailureMessage "Failed to clone GitHub repository"
+
+        if ($cloneSuccess) {
+            # Change to the new repository directory
+            Set-Location $RepoName
+            $script:ChangedToRepoDirectory = $true
+
+            Write-Host ""
+            Write-Host "✅ ENHANCEMENT SETUP COMPLETE" -ForegroundColor Green
+            Write-Host "Repository is ready for enhancement workflow:" -ForegroundColor Green
+            Write-Host "  • Current directory: $(Get-Location)" -ForegroundColor White
+            Write-Host "  • Remote origin: $GitHubRepoUrl" -ForegroundColor White
+            Write-Host ""
+            Write-Host "Next steps:" -ForegroundColor Yellow
+            Write-Host "  1. Run: .\Enhance-DotNetRepository.ps1 -RepositoryPath '.' " -ForegroundColor White
+            Write-Host "  2. Run: .\Update-DotNetProjectsAllBranches.ps1 -RepositoryPath '.' " -ForegroundColor White
+            Write-Host ""
+
+            return $true
+        } else {
+            Write-Host "ERROR: Failed to clone GitHub repository for enhancement" -ForegroundColor Red
+            return $false
+        }
+    } catch {
+        Write-Host "ERROR: Exception during enhancement setup - $_" -ForegroundColor Red
+        return $false
+    }
+}
+
 Write-Host ""
 Write-Host "Starting migration process..." -ForegroundColor Green
 
@@ -572,11 +643,24 @@ try {
     Write-Host "Repository '$RepoName' has been successfully migrated to:" -ForegroundColor Green
     Write-Host "https://github.com/$GitHubOrgName/$DestRepoName" -ForegroundColor Green
     Write-Host ""
-    Write-Host "Next steps:" -ForegroundColor Yellow
-    Write-Host "1. Verify the repository on GitHub" -ForegroundColor White
-    Write-Host "2. Update any CI/CD pipelines or integrations" -ForegroundColor White
-    Write-Host "3. Notify team members of the new repository location" -ForegroundColor White
-    Write-Host ""
+
+    # Setup for enhancement workflow if requested
+    if ($SetupForEnhancement) {
+        $enhancementSetupSuccess = Invoke-EnhancementSetup -GitHubRepoUrl $GitHubRepoUrl -RepoName $RepoName
+        if (-not $enhancementSetupSuccess) {
+            Write-Host "⚠️ Warning: Enhancement setup failed. You can manually clone the repository:" -ForegroundColor Yellow
+            Write-Host "  git clone $GitHubRepoUrl" -ForegroundColor White
+            Write-Host ""
+        }
+    } else {
+        Write-Host "Next steps:" -ForegroundColor Yellow
+        Write-Host "1. Verify the repository on GitHub" -ForegroundColor White
+        Write-Host "2. Clone the repository for local development:" -ForegroundColor White
+        Write-Host "   git clone https://github.com/$GitHubOrgName/$DestRepoName.git" -ForegroundColor Cyan
+        Write-Host "3. Update any CI/CD pipelines or integrations" -ForegroundColor White
+        Write-Host "4. Notify team members of the new repository location" -ForegroundColor White
+        Write-Host ""
+    }
 
 } catch {
     Write-Host ""
@@ -585,27 +669,33 @@ try {
     Write-Host ""
     
     # Perform error cleanup
+    # On error, always clean up unless KeepLocalRepo is specified
+    # SetupForEnhancement doesn't matter on error since the setup would have failed
     Invoke-Cleanup -SkipRepoCleanup:$KeepLocalRepo -IsErrorCleanup:$true
     exit 1
 } finally {
     # Always perform cleanup on successful completion (only if no exception was thrown)
     if ($? -and -not $Error.Count) {
-        # Determine if we should clean up the repository (automatic cleanup by default)
-        $shouldCleanupRepo = -not $KeepLocalRepo
+        # Determine if we should clean up the repository
+        # Skip cleanup if SetupForEnhancement was used (we want to keep the new clone)
+        # or if KeepLocalRepo was specified
+        $shouldCleanupRepo = -not $KeepLocalRepo -and -not $SetupForEnhancement
 
-        if ($KeepLocalRepo) {
+        if ($SetupForEnhancement) {
+            Write-Host "Enhancement setup completed. Repository ready for development work." -ForegroundColor Green
+        } elseif ($KeepLocalRepo) {
             Write-Host "Local repository directory '$RepoName' will be kept (KeepLocalRepo parameter specified)." -ForegroundColor Yellow
         } elseif ($script:RepoDirectoryCreated) {
             Write-Host "Automatically cleaning up local repository directory..." -ForegroundColor Cyan
         }
 
-        # Perform cleanup
+        # Perform cleanup (but skip repo cleanup if SetupForEnhancement was used)
         Invoke-Cleanup -SkipRepoCleanup:(-not $shouldCleanupRepo)
 
         if ($shouldCleanupRepo) {
             Write-Host ""
             Write-Host "Migration completed successfully with automatic cleanup." -ForegroundColor Green
-        } else {
+        } elseif (-not $SetupForEnhancement) {
             Write-Host ""
             Write-Host "Migration completed successfully. Local repository preserved at: $RepoName" -ForegroundColor Green
         }

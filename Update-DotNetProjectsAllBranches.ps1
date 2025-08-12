@@ -322,49 +322,68 @@ function Get-RelativePath {
 function Initialize-DevcontainerSource {
     Write-Info "Looking for .devcontainer folder in default branches..."
 
+    # First, try to detect the actual default branch from Git
+    $actualDefaultBranch = $null
+
     Push-Location $RepositoryPath
     try {
-        # Store current branch
-        $currentBranch = git branch --show-current
+        # Method 1: Check remote HEAD to get the actual default branch
+        $remoteHead = git symbolic-ref refs/remotes/origin/HEAD 2>$null
+        if ($LASTEXITCODE -eq 0 -and $remoteHead) {
+            $actualDefaultBranch = $remoteHead -replace "refs/remotes/origin/", ""
+            Write-Info "Detected default branch from remote HEAD: $actualDefaultBranch"
+        }
 
-        # Try to find .devcontainer in default branches
-        foreach ($branchName in $DEFAULT_BRANCH_NAMES) {
-            # Check if branch exists locally or remotely
-            $localBranchExists = git branch --list $branchName
-            $remoteBranchExists = git branch -r --list "origin/$branchName"
-
-            if ($localBranchExists -or $remoteBranchExists) {
-                # Checkout the branch
-                if ($localBranchExists) {
-                    git checkout $branchName 2>$null | Out-Null
-                } else {
-                    git checkout -b $branchName origin/$branchName 2>$null | Out-Null
-                }
-
-                if ($LASTEXITCODE -eq 0) {
-                    $devcontainerPath = Join-Path $RepositoryPath $DEVCONTAINER_FOLDER
-                    if (Test-Path $devcontainerPath) {
-                        $script:DevcontainerSourcePath = $devcontainerPath
-                        $script:DevcontainerSourceBranch = $branchName
-                        Write-Success "Found .devcontainer folder in branch: $branchName"
-
-                        # Restore original branch
-                        if ($currentBranch -and $currentBranch -ne $branchName) {
-                            git checkout $currentBranch 2>$null | Out-Null
-                        }
-                        return $true
-                    }
+        # Method 2: If remote HEAD is not set, try to determine it
+        if (-not $actualDefaultBranch) {
+            # Try to set remote HEAD first
+            git remote set-head origin -a 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                $remoteHead = git symbolic-ref refs/remotes/origin/HEAD 2>$null
+                if ($LASTEXITCODE -eq 0 -and $remoteHead) {
+                    $actualDefaultBranch = $remoteHead -replace "refs/remotes/origin/", ""
+                    Write-Info "Auto-detected default branch: $actualDefaultBranch"
                 }
             }
         }
 
-        # Restore original branch if we didn't find devcontainer
-        if ($currentBranch) {
-            git checkout $currentBranch 2>$null | Out-Null
+        # Method 3: Fallback to common default branch names
+        if (-not $actualDefaultBranch) {
+            foreach ($branchName in $DEFAULT_BRANCH_NAMES) {
+                git show-ref --verify --quiet "refs/remotes/origin/$branchName" 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                    $actualDefaultBranch = $branchName
+                    Write-Info "Using fallback default branch: $actualDefaultBranch"
+                    break
+                }
+            }
         }
 
-        Write-Warning "No .devcontainer folder found in default branches ($($DEFAULT_BRANCH_NAMES -join ', '))"
-        return $false
+        # Method 4: Use current branch as last resort
+        if (-not $actualDefaultBranch) {
+            $actualDefaultBranch = git branch --show-current 2>$null
+            if ($actualDefaultBranch) {
+                Write-Warning "Using current branch as default: $actualDefaultBranch"
+            }
+        }
+
+        if (-not $actualDefaultBranch) {
+            Write-Error "Could not determine default branch"
+            return $false
+        }
+
+        # Check if .devcontainer exists in the detected default branch using git show (no checkout needed)
+        $gitShowPath = "${actualDefaultBranch}:${DEVCONTAINER_FOLDER}/devcontainer.json"
+        git show $gitShowPath 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            $script:DevcontainerSourceBranch = $actualDefaultBranch
+            $script:DevcontainerSourcePath = Join-Path $RepositoryPath $DEVCONTAINER_FOLDER
+            Write-Success "Found .devcontainer folder in branch: $actualDefaultBranch"
+            return $true
+        } else {
+            Write-Warning "No .devcontainer folder found in default branch: $actualDefaultBranch"
+            return $false
+        }
 
     } catch {
         Write-Error "Error while searching for .devcontainer source: $($_.Exception.Message)"
@@ -379,40 +398,53 @@ function Sync-DevcontainerFolder {
     param([string]$BranchName)
 
     # Skip if no devcontainer source found or if we're on the source branch
-    if (-not $script:DevcontainerSourcePath -or $BranchName -eq $script:DevcontainerSourceBranch) {
+    if (-not $script:DevcontainerSourceBranch -or $BranchName -eq $script:DevcontainerSourceBranch) {
         return $false
     }
 
     try {
-        # We need to get the devcontainer content from the source branch
-        # since we're currently on the target branch
         Push-Location $RepositoryPath
 
-        # Store current branch
-        $currentBranch = git branch --show-current
-
-        # Temporarily switch to source branch to get devcontainer content
-        git checkout $script:DevcontainerSourceBranch 2>$null | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning "Failed to checkout source branch $script:DevcontainerSourceBranch for devcontainer sync"
-            return $false
-        }
-
-        # Check if devcontainer exists in source branch
-        if (-not (Test-Path $script:DevcontainerSourcePath)) {
-            Write-Warning ".devcontainer folder not found in source branch $script:DevcontainerSourceBranch"
-            git checkout $currentBranch 2>$null | Out-Null
-            return $false
-        }
-
-        # Create temporary copy of devcontainer
+        # Create temporary directory for devcontainer extraction
         $tempDevcontainerPath = Join-Path $env:TEMP "devcontainer-sync-$(Get-Random)"
-        Copy-Item -Path $script:DevcontainerSourcePath -Destination $tempDevcontainerPath -Recurse -Force
+        New-Item -ItemType Directory -Path $tempDevcontainerPath -Force | Out-Null
 
-        # Switch back to target branch
-        git checkout $currentBranch 2>$null | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "Failed to return to branch $currentBranch"
+        # Extract .devcontainer files from source branch using git show (no checkout needed)
+        Write-Info "Extracting .devcontainer files from $script:DevcontainerSourceBranch branch..."
+
+        # Get list of files in .devcontainer folder from source branch
+        $devcontainerFiles = git ls-tree -r --name-only $script:DevcontainerSourceBranch -- $DEVCONTAINER_FOLDER 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $devcontainerFiles) {
+            Write-Warning ".devcontainer folder not found in source branch $script:DevcontainerSourceBranch"
+            Remove-Item -Path $tempDevcontainerPath -Recurse -Force -ErrorAction SilentlyContinue
+            return $false
+        }
+
+        # Extract each file from the source branch
+        $extractedFiles = @()
+        foreach ($file in $devcontainerFiles) {
+            $relativePath = $file.Substring($DEVCONTAINER_FOLDER.Length + 1) # Remove ".devcontainer/" prefix
+            $targetFile = Join-Path $tempDevcontainerPath $relativePath
+            $targetDir = Split-Path $targetFile -Parent
+
+            # Create directory structure if needed
+            if (-not (Test-Path $targetDir)) {
+                New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+            }
+
+            # Extract file content using git show
+            $gitShowPath = "${script:DevcontainerSourceBranch}:${file}"
+            $fileContent = git show $gitShowPath 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                Set-Content -Path $targetFile -Value $fileContent -Encoding UTF8
+                $extractedFiles += $targetFile
+            } else {
+                Write-Warning "Failed to extract file: $file"
+            }
+        }
+
+        if ($extractedFiles.Count -eq 0) {
+            Write-Warning "No .devcontainer files could be extracted from $script:DevcontainerSourceBranch"
             Remove-Item -Path $tempDevcontainerPath -Recurse -Force -ErrorAction SilentlyContinue
             return $false
         }
@@ -422,24 +454,26 @@ function Sync-DevcontainerFolder {
 
         # Check if target already has .devcontainer and if it's different
         if (Test-Path $targetDevcontainerPath) {
-            # Compare the folders to see if sync is needed
-            $sourceFiles = Get-ChildItem -Path $tempDevcontainerPath -Recurse -File
+            Write-Info "Comparing existing .devcontainer with source..."
             $needsSync = $false
 
-            foreach ($sourceFile in $sourceFiles) {
-                $relativePath = $sourceFile.FullName.Substring($tempDevcontainerPath.Length).TrimStart('\', '/')
+            # Compare each extracted file with existing target
+            foreach ($extractedFile in $extractedFiles) {
+                $relativePath = $extractedFile.Substring($tempDevcontainerPath.Length).TrimStart('\', '/')
                 $targetFile = Join-Path $targetDevcontainerPath $relativePath
 
                 if (-not (Test-Path $targetFile)) {
+                    Write-Info "New file detected: $relativePath"
                     $needsSync = $true
                     break
                 }
 
                 # Compare file content
-                $sourceContent = Get-Content $sourceFile.FullName -Raw -ErrorAction SilentlyContinue
+                $sourceContent = Get-Content $extractedFile -Raw -ErrorAction SilentlyContinue
                 $targetContent = Get-Content $targetFile -Raw -ErrorAction SilentlyContinue
 
                 if ($sourceContent -ne $targetContent) {
+                    Write-Info "Content difference detected in: $relativePath"
                     $needsSync = $true
                     break
                 }
@@ -458,12 +492,26 @@ function Sync-DevcontainerFolder {
                 Remove-Item -Path $targetDevcontainerPath -Recurse -Force -ErrorAction Stop
             }
 
-            # Copy .devcontainer folder from temp location
-            Copy-Item -Path $tempDevcontainerPath -Destination $targetDevcontainerPath -Recurse -Force -ErrorAction Stop
+            # Create .devcontainer directory
+            New-Item -ItemType Directory -Path $targetDevcontainerPath -Force | Out-Null
 
-            # Verify the copy was successful
+            # Copy extracted files to target location
+            foreach ($extractedFile in $extractedFiles) {
+                $relativePath = $extractedFile.Substring($tempDevcontainerPath.Length).TrimStart('\', '/')
+                $targetFile = Join-Path $targetDevcontainerPath $relativePath
+                $targetDir = Split-Path $targetFile -Parent
+
+                # Create directory structure if needed
+                if (-not (Test-Path $targetDir)) {
+                    New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+                }
+
+                Copy-Item -Path $extractedFile -Destination $targetFile -Force
+            }
+
+            # Verify the sync was successful
             if (-not (Test-Path $targetDevcontainerPath)) {
-                throw "Failed to copy .devcontainer folder to target location"
+                throw "Failed to create .devcontainer folder in target location"
             }
         }
 

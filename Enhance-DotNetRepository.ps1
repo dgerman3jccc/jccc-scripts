@@ -25,11 +25,20 @@
 .PARAMETER BackupPath
     Path to store backups (defaults to ./backup-{timestamp})
 
+.PARAMETER PostMigration
+    Indicates this script is running after repository migration (enables additional validations)
+
+.PARAMETER ExpectedRemoteOrg
+    Expected GitHub organization name for validation (e.g., "oop-jccc")
+
 .EXAMPLE
     .\Enhance-DotNetRepository.ps1 -RepositoryPath "C:\repos\my-dotnet-project"
 
 .EXAMPLE
     .\Enhance-DotNetRepository.ps1 -RepositoryPath "." -DefaultBranch "main" -DryRun
+
+.EXAMPLE
+    .\Enhance-DotNetRepository.ps1 -RepositoryPath "." -PostMigration -ExpectedRemoteOrg "oop-jccc"
 
 .NOTES
     Author: .NET Repository Enhancement Protocol
@@ -41,18 +50,24 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$RepositoryPath,
-    
+
     [Parameter(Mandatory = $false)]
     [string]$DefaultBranch = "",
-    
+
     [Parameter(Mandatory = $false)]
     [switch]$DryRun,
-    
+
     [Parameter(Mandatory = $false)]
     [switch]$SkipBranchSync,
-    
+
     [Parameter(Mandatory = $false)]
-    [string]$BackupPath = ""
+    [string]$BackupPath = "",
+
+    [Parameter(Mandatory = $false)]
+    [switch]$PostMigration,
+
+    [Parameter(Mandatory = $false)]
+    [string]$ExpectedRemoteOrg = ""
 )
 
 # Script configuration
@@ -63,6 +78,8 @@ $ProgressPreference = "SilentlyContinue"
 $script:Changes = @()
 $script:Errors = @()
 $script:BackupCreated = $false
+$script:GitHubOrg = ""
+$script:GitHubRepo = ""
 
 # Color output functions
 function Write-ColorOutput {
@@ -166,6 +183,78 @@ function Test-Prerequisites {
         throw "Not a Git repository: $RepositoryPath"
     }
     finally {
+        Pop-Location
+    }
+}
+
+function Test-RepositoryState {
+    Write-Phase "Validating Repository State"
+
+    Push-Location $RepositoryPath
+    try {
+        # Get remote origin URL
+        $remoteUrl = git remote get-url origin 2>$null
+        if (-not $remoteUrl) {
+            Write-Warning "No remote origin configured. This may indicate an incomplete repository setup."
+            if ($PostMigration) {
+                throw "Post-migration validation failed: No remote origin found. Expected GitHub repository remote."
+            }
+        } else {
+            Write-Success "Remote origin found: $remoteUrl"
+
+            # Validate remote origin if expected organization is specified
+            if ($ExpectedRemoteOrg) {
+                if ($remoteUrl -match "github\.com[:/]$ExpectedRemoteOrg/") {
+                    Write-Success "Remote origin matches expected organization: $ExpectedRemoteOrg"
+                } else {
+                    $warningMsg = "Remote origin does not match expected organization '$ExpectedRemoteOrg'. Found: $remoteUrl"
+                    if ($PostMigration) {
+                        throw "Post-migration validation failed: $warningMsg"
+                    } else {
+                        Write-Warning $warningMsg
+                    }
+                }
+            }
+
+            # Check if this looks like a GitHub repository
+            if ($remoteUrl -match "github\.com") {
+                Write-Success "GitHub repository detected"
+
+                # Extract repository name for later use
+                if ($remoteUrl -match "github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?/?$") {
+                    $script:GitHubOrg = $matches[1]
+                    $script:GitHubRepo = $matches[2]
+                    Write-Info "GitHub Organization: $script:GitHubOrg"
+                    Write-Info "Repository Name: $script:GitHubRepo"
+                }
+            } else {
+                Write-Warning "Non-GitHub remote detected. Some features may not work optimally."
+            }
+        }
+
+        # Check repository status
+        $status = git status --porcelain 2>$null
+        if ($status) {
+            Write-Warning "Repository has uncommitted changes. Consider committing or stashing changes before enhancement."
+            if ($PostMigration) {
+                Write-Info "Post-migration: Uncommitted changes detected, but this is expected after fresh clone."
+            }
+        } else {
+            Write-Success "Repository working directory is clean"
+        }
+
+        # Check if we can fetch from remote (connectivity test)
+        if ($remoteUrl) {
+            Write-Info "Testing remote connectivity..."
+            $fetchTest = git ls-remote --heads origin 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Success "Remote connectivity verified"
+            } else {
+                Write-Warning "Cannot connect to remote repository. Check network connectivity and credentials."
+            }
+        }
+
+    } finally {
         Pop-Location
     }
 }
@@ -594,10 +683,14 @@ function Get-ReadmeTemplate {
 
     $projectPath = if ($MainProject.Directory) { $MainProject.Directory } else { "." }
 
+    # Use detected GitHub info if available, otherwise use placeholders
+    $githubOrg = if ($script:GitHubOrg) { $script:GitHubOrg } else { "USER" }
+    $githubRepo = if ($script:GitHubRepo) { $script:GitHubRepo } else { "REPO" }
+
     return @"
 # $RepositoryName
 
-[![.NET CI/CD Pipeline](https://github.com/USER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/USER/REPO/actions/workflows/ci.yml)
+[![.NET CI/CD Pipeline](https://github.com/$githubOrg/$githubRepo/actions/workflows/ci.yml/badge.svg)](https://github.com/$githubOrg/$githubRepo/actions/workflows/ci.yml)
 
 This repository contains a .NET application with a fully configured development environment for optimal productivity.
 
@@ -742,6 +835,28 @@ This project follows standard C# coding conventions:
 
 Happy coding!
 "@
+}
+
+function Show-PostMigrationGuidance {
+    if ($PostMigration) {
+        Write-ColorOutput "`n=== Post-Migration Enhancement Complete ===" "Green"
+        Write-Info "This repository has been successfully enhanced after migration."
+        Write-Info ""
+        Write-Info "Migration + Enhancement workflow completed:"
+        Write-ColorOutput "  ✅ Repository migrated to GitHub" "Green"
+        Write-ColorOutput "  ✅ Development environment configured" "Green"
+        Write-ColorOutput "  ✅ VS Code and DevContainer setup complete" "Green"
+        Write-ColorOutput "  ✅ CI/CD pipeline configured" "Green"
+        Write-ColorOutput "  ✅ Professional documentation created" "Green"
+        Write-Info ""
+        Write-Info "Next step in the modernization workflow:"
+        Write-ColorOutput "  Run: .\Update-DotNetProjectsAllBranches.ps1 -RepositoryPath '.'" "Cyan"
+        Write-Info ""
+        Write-Info "This will:"
+        Write-Info "  • Update all .NET projects to .NET 8.0 and C# 12"
+        Write-Info "  • Add .idea/ to .gitignore files"
+        Write-Info "  • Ensure .devcontainer is synchronized across all branches"
+    }
 }
 
 # Implementation functions
@@ -1104,6 +1219,9 @@ function Main {
         # Validate prerequisites
         Test-Prerequisites
 
+        # Validate repository state and remote configuration
+        Test-RepositoryState
+
         # Detect .NET projects
         $projects = Get-DotNetProjects
         $mainProject = $projects | Where-Object { $_.Type -eq "Project" } | Select-Object -First 1
@@ -1134,7 +1252,10 @@ function Main {
 
         Write-ColorOutput "`nSUCCESS: .NET Repository Enhancement Protocol completed successfully!" "Green"
 
-        if (-not $DryRun) {
+        # Show post-migration guidance if applicable
+        Show-PostMigrationGuidance
+
+        if (-not $DryRun -and -not $PostMigration) {
             Write-Info "`nNext steps:"
             Write-Info "1. Open the repository in VS Code or GitHub Codespaces"
             Write-Info "2. Test the build and debug configurations"
